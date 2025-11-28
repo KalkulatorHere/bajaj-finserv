@@ -152,3 +152,53 @@ The solution is evaluated on:
 ## Author
 
 Created for Bajaj Finserv Datathon
+
+## Repository
+
+**GitHub**: https://github.com/KalkulatorHere/bajaj-finserv
+
+## Current Status
+
+✅ **Code Complete** - All components implemented  
+✅ **Dockerized** - Ready for containerized deployment  
+✅ **Documented** - Comprehensive guides included  
+⚠️ **Testing Required** - Install Tesseract and run tests
+
+See [TESTING_GUIDE.md](TESTING_GUIDE.md) for detailed testing instructions.
+
+## Quick Deploy & Test
+
+```bash
+# Clone the repo
+git clone https://github.com/KalkulatorHere/bajaj-finserv.git
+cd bajaj-finserv
+
+# Option 1: Docker (Recommended)
+docker build -t bill-extraction .
+docker run -p 8000:8000 bill-extraction
+
+# Option 2: Local (Install Tesseract first)
+pip install -r requirements_docker.txt
+python run_all_tests.py  # Test all 15 samples
+uvicorn app:app --reload  # Start API server
+```
+
+## Project Structure
+
+```
+.
+├── app.py                    # FastAPI application
+├── ocr_engine.py            # Tesseract OCR wrapper
+├── extractor.py             # Extraction logic
+├── utils.py                 # Helper functions
+├── test_extraction.py       # Single file test
+├── run_all_tests.py         # Batch test script
+├── test_api.py              # API integration test
+├── Dockerfile               # Container definition
+├── requirements_docker.txt  # Python dependencies
+├── README.md                # This file
+├── DEPLOYMENT_GUIDE.md      # Detailed deployment instructions
+├── TESTING_GUIDE.md         # Testing and tuning guide
+└── TRAINING_SAMPLES/        # 15 training PDFs
+```
+
