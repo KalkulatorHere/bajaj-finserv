@@ -3,6 +3,12 @@ from pathlib import Path
 import subprocess
 import json
 import sys
+import codecs
+
+# Fix Windows console encoding
+if sys.platform == 'win32':
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 
 def run_all_tests():
@@ -35,22 +41,23 @@ def run_all_tests():
                 ["python", "test_extraction.py", str(pdf_file)],
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=60,
+                encoding='utf-8'
             )
             
             if result.returncode == 0:
-                print("✓ Success")
+                print("[SUCCESS]")
                 successful += 1
                 
                 # Try to read output file
                 output_file = pdf_file.parent.parent / f"{pdf_file.stem}_output.json"
                 if output_file.exists():
-                    with open(output_file, 'r') as f:
+                    with open(output_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         if 'data' in data:
                             total_items = data['data'].get('total_item_count', 0)
                             reconciled_amount = data['data'].get('reconciled_amount', 0)
-                            print(f"  Items: {total_items}, Amount: ₹{reconciled_amount:.2f}")
+                            print(f"  Items: {total_items}, Amount: Rs.{reconciled_amount:.2f}")
                 
                 results.append({
                     'file': pdf_file.name,
@@ -58,8 +65,8 @@ def run_all_tests():
                     'output': result.stdout
                 })
             else:
-                print(f"✗ Failed (exit code: {result.returncode})")
-                print(f"  Error: {result.stderr[:200]}")
+                print(f"[FAILED] (exit code: {result.returncode})")
+                print(f"  Error: {result.stderr[:200] if result.stderr else 'No error output'}")
                 failed += 1
                 results.append({
                     'file': pdf_file.name,
@@ -68,14 +75,14 @@ def run_all_tests():
                 })
                 
         except subprocess.TimeoutExpired:
-            print("✗ Timeout (>60s)")
+            print("[TIMEOUT] (>60s)")
             failed += 1
             results.append({
                 'file': pdf_file.name,
                 'status': 'timeout'
             })
         except Exception as e:
-            print(f"✗ Exception: {e}")
+            print(f"[EXCEPTION] {e}")
             failed += 1
             results.append({
                 'file': pdf_file.name,

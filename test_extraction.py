@@ -1,9 +1,16 @@
 """Quick test of the extraction pipeline on a local file."""
 import sys
+import os
 from pathlib import Path
 from ocr_engine import OCREngine
 from extractor import BillExtractor
 import json
+
+# Fix Windows console encoding
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 
 def test_single_file(file_path: str):
@@ -30,7 +37,7 @@ def test_single_file(file_path: str):
         print("\nResults:")
         print("-" * 80)
         print(f"Total items: {data['total_item_count']}")
-        print(f"Reconciled amount: ₹{data['reconciled_amount']:.2f}")
+        print(f"Reconciled amount: Rs.{data['reconciled_amount']:.2f}")
         print(f"Pages: {len(data['pagewise_line_items'])}")
         
         print("\nPage-wise breakdown:")
@@ -40,7 +47,7 @@ def test_single_file(file_path: str):
             
             for i, item in enumerate(page_data['bill_items'][:10], 1):
                 print(f"    {i}. {item['item_name'][:60]}")
-                print(f"       Qty: {item['item_quantity']}, Rate: ₹{item['item_rate']:.2f}, Amount: ₹{item['item_amount']:.2f}")
+                print(f"       Qty: {item['item_quantity']}, Rate: Rs.{item['item_rate']:.2f}, Amount: Rs.{item['item_amount']:.2f}")
             
             if len(page_data['bill_items']) > 10:
                 print(f"    ... and {len(page_data['bill_items']) - 10} more items")
@@ -54,12 +61,12 @@ def test_single_file(file_path: str):
                 'data': data
             }, f, indent=2, ensure_ascii=False)
         
-        print(f"\n✓ Output saved to: {output_file}")
+        print(f"\n[SUCCESS] Output saved to: {output_file}")
         
         return True
         
     except Exception as e:
-        print(f"✗ Error: {e}")
+        print(f"[ERROR] {e}")
         import traceback
         traceback.print_exc()
         return False
