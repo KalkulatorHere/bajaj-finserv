@@ -1,0 +1,255 @@
+Summary (one-line)
+
+Use OpenCV/pdf2image → layout detection (layoutparser/YOLO/Detectron-free models) → region-level OCR with PaddleOCR → table-region segmentation + row-clustering → Donut (HuggingFace) fine-tuned for row-to-fields mapping and totals extraction → dedupe & reconcile totals → FastAPI endpoint.
+
+Free tools to use
+
+Image conversion/preproc: pdf2image, OpenCV (cv2).
+
+Layout detection / table detection: layoutparser (with public Detectron2 or Paddle backend) or lightweight YOLOv8 (ultralytics).
+
+OCR: PaddleOCR (excellent on scanned docs, gives boxes + text + confidence).
+
+Visual IE model: Donut (Hugging Face implementation — open-source).
+
+Table structure: Camelot / pdfplumber (if PDF has text layer) + layoutparser/ CascadeTabNet-like models (open-source) for image tables.
+
+Fuzzy matching / dedupe: rapidfuzz.
+
+Web/API: FastAPI, uvicorn.
+
+Utilities: pandas, numpy, regex, python-Levenshtein (optional).
+
+Dev/annotation: Label Studio (open-source) to create Donut training pairs.
+
+Pipeline (step-by-step, prioritized)
+
+Follow these stages. I give code-level hints for the ones you’ll implement first.
+
+1) Ingest & preprocess (do this always)
+
+Convert PDF → images (300–400 DPI) using pdf2image.
+
+For each page: deskew, denoise, contrast-equalize, optional binarize. Use OpenCV.
+
+Save images as JPEG/PNG for downstream.
+
+Quick snippet:
+
+from pdf2image import convert_from_path
+images = convert_from_path("invoice.pdf", dpi=300)
+# Then OpenCV preproc per image: blur, adaptiveThreshold / denoise
+
+2) Layout detection & page classification
+
+Detect likely regions: header, line-item area (tables/lists), footer/totals.
+
+Use layoutparser with a public model (PubLayNet/Detectron2) or a lightweight YOLO model trained on invoice/table labels.
+
+Also run a small rule-based page-type classifier: if page contains TOTAL|NET AMT|SUBTOTAL|AMT: words, tag as Final Bill else Bill Detail.
+
+Why: isolates table area and totals, reduces back-and-forth OCR noise.
+
+3) OCR (use PaddleOCR)
+
+Run PaddleOCR on whole page or on cropped regions (tables, totals areas). Paddle returns word boxes + text + confidence.
+
+Keep the bounding boxes and confidences — you’ll need them for row grouping and dedupe.
+
+Install:
+
+pip install paddlepaddle paddleocr
+
+
+Example:
+
+from paddleocr import PaddleOCR
+ocr = PaddleOCR(use_angle_cls=True, lang='en')
+result = ocr.ocr(image_path, cls=True)
+# result -> list of lines with box, text, conf
+
+4) Table detection & row clustering
+
+Two paths:
+
+If PDF has text layer: use pdfplumber/camelot to directly extract table grid.
+
+Else (scanned): use layoutparser table detector (or YOLO table model) to crop table bbox; then cluster OCR tokens into rows by vertical proximity.
+
+Row clustering idea:
+
+Compute center_y of each token; cluster tokens such that tokens with center_y within y_tol belong to same row (tune y_tol based on DPI).
+
+For each row, sort tokens by x ascending to reconstruct the row string and detect numeric columns (rightmost tokens often amounts).
+
+Simple row grouping pseudocode:
+
+# tokens = [{'x1', 'x2', 'y1','y2','text','conf'}...]
+tokens_sorted = sorted(tokens, key=lambda t: t['y1'])
+rows = []
+current_row = []
+current_y = None
+for t in tokens_sorted:
+    cy = (t['y1']+t['y2'])/2
+    if current_y is None or abs(cy-current_y) < y_tol:
+        current_row.append(t)
+        current_y = (current_y+cy)/2 if current_y else cy
+    else:
+        rows.append(current_row)
+        current_row = [t]; current_y = cy
+if current_row: rows.append(current_row)
+
+5) Field extraction per row (heuristic + Donut)
+
+Heuristic parse first: detect amounts by regex in rightmost tokens; detect quantity/rate by proximity to words like Qty, Rate, Rs..
+
+Then run Donut on each row image or the whole table region to extract structured fields (item_name, qty, rate, amount). Donut excels at mapping visual noisy rows/kv text to JSON when fine-tuned.
+
+Why Donut: it’s layout-aware and can learn to output structured JSON even when OCR is noisy. But Donut does not give bounding boxes — combine with PaddleOCR boxes.
+
+Donut fine-tuning tips (free):
+
+Create training pairs: input image (table region / page crop) → output JSON string like:
+
+{"items":[{"item_name":"MODULAR CUP 43MM","qty":"1","rate":"16500","amount":"16500.00"}, ...], "totals":{"sub_total":"68500","net_amount":"71925"}}
+
+
+Use Label Studio to mark rows and export JSON; convert to Donut seq2seq format.
+
+Fine-tune Donut small/medium on a few dozen examples (you have ~15 docs) with augmentation (rotation, noise). Use free GPU (Colab free runtime — limited) but start small.
+
+Hugging Face Donut quick start: use transformers + donut examples. You’ll find adapters/heads for seq2seq. (Search "donut huggingface fine-tune receipt" — offline you’ll follow HF examples.)
+
+6) Deduplication & merging across pages
+
+Create normalized signature:
+
+Normalize item_name: lowercase, remove punctuation, collapse whitespace, strip tokens like nos, no, pcs.
+
+signature = normalize(item_name) + '|' + round(amount,2) + '|' + (qty or '').
+
+Use rapidfuzz.fuzz.token_set_ratio to compare signatures across rows; merge if score >= 90 and absolute amount difference <= small tolerance (₹1–5 or 0.5%).
+
+Merge split rows whose bounding boxes align vertically/horizontally close.
+
+7) Totals detection & reconciliation
+
+Use fuzzy keywords to find lines containing totals: subtotal, sub total, net amt, net amount, amount due, round off, grand total, total.
+
+Parse numeric token nearest those keywords as reported_total.
+
+Compute calculated_total = sum(unique_item_amounts).
+
+If |calculated_total - reported_total| <= tolerance → success.
+
+If large mismatch: attempt:
+
+exclude tax/fee lines (look for keywords tax, gst, disc, discount, %).
+
+look for components like round off or carry forward.
+
+otherwise mark doc for manual review and return both values.
+
+8) Output JSON & API
+
+Return the exact schema required. Example FastAPI stub:
+
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.post("/extract-bill-data")
+def extract_bill_data(payload: dict):
+    url = payload['document']
+    # download file, run pipeline, return JSON as required
+    return {"is_success": True, "token_usage": {"total_tokens":0,"input_tokens":0,"output_tokens":0},
+            "data": {"pagewise_line_items": [...], "total_item_count": N}}
+
+Where Donut fits exactly
+
+Use Donut for: mapping table region images → structured JSON (rows to fields) and for totals / key-value extraction from total area.
+
+Use PaddleOCR for tokenization + bounding boxes and fallback when Donut misses tokens.
+
+Donut alone may miss precise numeric segmentation (it’s generative) — combine it with token-based numeric verification from PaddleOCR.
+
+Training / annotation (free)
+
+Use Label Studio to annotate: page_type, table bbox, row-level fields (item_name, qty, rate, amount), total lines.
+
+Export labels to JSON; write a script to convert labels to Donut training format.
+
+Augment by programmatic transforms: random noise, small rotations, cropping, brightness, fonts.
+
+Metrics to log (free)
+
+Line item field F1 (name exact-match tolerance via token-set ratio), amount MAE, totals MAE/MAPE, dedupe precision/recall.
+
+Also track per-doc |calculated_total - reported_total|.
+
+Quick implementation priority (what to build first)
+
+Basic pipeline (pdf2image → PaddleOCR → row clustering by y → regex amounts) — baseline in 1 day.
+
+Add layoutparser table region detection to reduce noise.
+
+Implement dedupe & reconciliation logic.
+
+Fine-tune Donut for table→JSON mapping (improves parsing) — takes more time but pay-off high.
+
+Wrap in FastAPI + Docker.
+
+Short code example: OCR → row grouping → amount detection (PaddleOCR)
+from paddleocr import PaddleOCR
+import re
+ocr = PaddleOCR(use_angle_cls=True, lang='en')
+
+def parse_page(image_path, y_tol=12):
+    ocr_results = ocr.ocr(image_path, cls=True)
+    tokens = []
+    for line in ocr_results:
+        box, (text, conf) = line
+        x1 = min([p[0] for p in box]); y1 = min([p[1] for p in box])
+        x2 = max([p[0] for p in box]); y2 = max([p[1] for p in box])
+        tokens.append({'x1':x1,'x2':x2,'y1':y1,'y2':y2,'text':text,'conf':conf})
+    # group by y
+    tokens.sort(key=lambda t: t['y1'])
+    rows, cur = [], []
+    cur_y = None
+    for t in tokens:
+        cy = (t['y1']+t['y2'])/2
+        if cur_y is None or abs(cy-cur_y) <= y_tol:
+            cur.append(t); cur_y = cur_y and (cur_y+cy)/2 or cy
+        else:
+            rows.append(cur); cur=[t]; cur_y=cy
+    if cur: rows.append(cur)
+    parsed = []
+    amt_re = re.compile(r'(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)')
+    for r in rows:
+        r_sorted = sorted(r, key=lambda x:x['x1'])
+        row_text = " ".join([w['text'] for w in r_sorted])
+        amounts = amt_re.findall(row_text)
+        amount = float(amounts[-1].replace(',','')) if amounts else None
+        parsed.append({'row_text':row_text,'amount':amount,'tokens':r_sorted})
+    return parsed
+
+Dedup rules (practical)
+
+If two rows have token_set_ratio(name1,name2) >= 90 and abs(amount1-amount2) <= max(1, 0.01*amount1), merge.
+
+For split rows: if names are partial and x-extents overlap and vertical gap small → concatenate before signature.
+
+Edge-cases & tips (practical, no fluff)
+
+If numbers printed in words (rare): search for Rupees and use tiny language model or rule-based mapping — defer to manual review if too noisy.
+
+If totals mismatch by a few rupees: check round off and tax lines.
+
+Keep a manual-review queue showing page image + flagged rows with low confidence.
+
+Final notes (blunt)
+
+Donut helps a lot, but you’ll need token-level OCR (PaddleOCR) for accurate amounts and bounding boxes. Donut without bounding boxes is brittle for precise numeric reconciliation.
+
+Start with a simple OCR+regex baseline — it will handle many docs quickly. Then add Donut fine-tuning on annotated table regions to fix the rest.
+
+Everything above is free to implement — use Colab/GPU for fine-tuning if you don’t have a GPU locally.
